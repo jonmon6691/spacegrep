@@ -28,14 +28,27 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    configs:
+      - source: caddy_config
+        target: /etc/caddy/Caddyfile
     volumes:
       - caddy_data:/data
       - caddy_config:/config
     environment:
       - DOMAIN_NAME=${DOMAIN_NAME:-example.com}
-    command: caddy reverse-proxy --from ${DOMAIN_NAME:-example.com} --to spacegrep-app:8000
     depends_on:
       - spacegrep-app
+
+configs:
+  caddy_config:
+    content: |
+      ${DOMAIN_NAME:-example.com} {
+          log {
+              output stdout
+              format json
+          }
+          reverse_proxy spacegrep-app:8000
+      }
 
 volumes:
   caddy_data:

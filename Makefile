@@ -1,4 +1,4 @@
-.PHONY: all install test build run dev seed docker-build docker-up docker-down clean
+.PHONY: all install test build run dev seed docker-build docker-up docker-down clean stats
 
 all: install build test
 
@@ -31,6 +31,10 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+stats:
+	@which goaccess >/dev/null 2>&1 || (echo "goaccess is required. Install via 'brew install goaccess' or your package manager." >&2 && exit 1)
+	docker compose logs --no-log-prefix -f caddy 2>&1 | goaccess - --log-format=CADDY
 
 clean:
 	@echo "Stopping any running backend server processes..."
