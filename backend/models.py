@@ -65,3 +65,25 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
 
+
+class PolicyInspectionResult(BaseModel):
+    has_faces: bool = False
+    is_good_quality: bool = True
+    is_meme_or_unrelated: bool = False
+    policy_warnings: List[str] = Field(default_factory=list)
+    advice: Optional[str] = None
+
+
+class GeminiAreaComparisonResponse(BaseModel):
+    is_same_area: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    structural_reasons: str
+
+
+class ShelfMatchResult(BaseModel):
+    is_replacement: bool = False
+    matched_photo_id: Optional[str] = None
+    matched_photo_name: Optional[str] = None
+    confidence: float = 0.0
+    structural_reasons: Optional[str] = None
+

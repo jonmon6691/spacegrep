@@ -15,11 +15,16 @@ services:
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
       - WHITEBOX_LOGO_URL=${WHITEBOX_LOGO_URL:-}
       - WHITEBOX_LINK_URL=${WHITEBOX_LINK_URL:-}
       - DATA_DIR=/app/data
       - PORT=8000
+      # Slack Socket Mode Integration
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID:-}
+      - SPACEGREP_BASE_URL=${SPACEGREP_BASE_URL:-}
 
   caddy:
     image: caddy:alpine

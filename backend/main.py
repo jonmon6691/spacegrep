@@ -43,6 +43,7 @@ from backend.models import (
     RenamePhotoRequest,
 )
 from backend.seed import enqueue_seed_photos
+from backend.slack import start_slack_bot, stop_slack_bot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -270,8 +271,22 @@ async def lifespan(app: FastAPI):
         logger.info("Startup complete. Enqueued %d seed photos for background ingestion.", queued_count)
     except Exception as e:
         logger.exception("Error during background auto-seed check: %s", e)
+
+    # Start the Slack Socket Mode bot if configured
+    try:
+        await start_slack_bot()
+    except Exception as e:
+        logger.exception("Failed to initialize Slack bot during startup: %s", e)
+
     yield
-    # Shutdown
+
+    # Shutdown Slack bot
+    try:
+        await stop_slack_bot()
+    except Exception as e:
+        logger.warning("Error stopping Slack bot during shutdown: %s", e)
+
+    # Shutdown ingestion worker
     await ingest_manager.stop()
 
 

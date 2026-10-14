@@ -461,3 +461,51 @@ def delete_photo(photo_id: str) -> bool:
             return cursor.rowcount > 0
     finally:
         conn.close()
+
+
+def search_inventory_summary(query: str) -> Dict[str, Any]:
+    """
+    Performs a fast substring scan across bin labels and semantic tags for Slack query previews.
+    Returns match count, affected shelf names, and sample matching labels.
+    """
+    clean_q = query.strip().lower()
+    if not clean_q:
+        return {"total_matches": 0, "shelves": [], "sample_labels": []}
+
+    conn = get_db_connection()
+    try:
+        # Match label or semantic_tags containing the query
+        rows = conn.execute(
+            """
+            SELECT b.label, b.semantic_tags, p.original_name, p.id as photo_id
+            FROM bins b
+            JOIN photos p ON b.photo_id = p.id
+            WHERE LOWER(b.label) LIKE ? OR LOWER(b.semantic_tags) LIKE ?
+            ORDER BY p.order_index ASC, b.label ASC
+            """,
+            (f"%{clean_q}%", f"%{clean_q}%"),
+        ).fetchall()
+
+        matching_shelves: List[str] = []
+        sample_labels: List[str] = []
+        seen_shelves = set()
+        seen_labels = set()
+
+        for r in rows:
+            shelf_name = r["original_name"]
+            if shelf_name not in seen_shelves:
+                seen_shelves.add(shelf_name)
+                matching_shelves.append(shelf_name)
+
+            label = r["label"]
+            if label not in seen_labels and len(sample_labels) < 5:
+                seen_labels.add(label)
+                sample_labels.append(label)
+
+        return {
+            "total_matches": len(rows),
+            "shelves": matching_shelves,
+            "sample_labels": sample_labels,
+        }
+    finally:
+        conn.close()

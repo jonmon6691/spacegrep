@@ -14,9 +14,16 @@ import { getStoredToken, clearStoredToken } from './utils/auth';
 const KIOSK_TIMEOUT_SECONDS = 60;
 
 export function App() {
+  const initialQuery = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    const params = new URLSearchParams(window.location.search);
+    return params.get('q') || params.get('search') || '';
+  }, []);
+  const hasUrlQuery = Boolean(initialQuery);
+
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [matchesByBinId, setMatchesByBinId] = useState<Record<string, MatchResult>>({});
   const [highCount, setHighCount] = useState(0);
   const [moderateCount, setModerateCount] = useState(0);
@@ -48,6 +55,7 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const queryCounter = useRef(0);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const hasAutoCenteredRef = useRef(false);
 
   // Ordered matches in visual top-to-bottom reading order
   const orderedMatches = useMemo(() => {
@@ -106,7 +114,16 @@ export function App() {
 
     worker.onmessage = (e: MessageEvent<WorkerOutgoingMessage>) => {
       const msg = e.data;
-      if (msg.type === 'SEARCH_RESULTS') {
+      if (msg.type === 'INIT_READY') {
+        if (initialQuery) {
+          queryCounter.current += 1;
+          worker.postMessage({
+            type: 'SEARCH',
+            query: initialQuery,
+            queryId: queryCounter.current,
+          });
+        }
+      } else if (msg.type === 'SEARCH_RESULTS') {
         // Only accept if matches latest query counter
         if (msg.queryId === queryCounter.current) {
           setMatchesByBinId(msg.matches);
@@ -123,7 +140,7 @@ export function App() {
       worker.terminate();
       workerRef.current = null;
     };
-  }, [loadManifest]);
+  }, [loadManifest, initialQuery]);
 
   // Scroll a specific bin smoothly to the vertical center of the viewport
   const scrollToBin = useCallback(
@@ -156,6 +173,15 @@ export function App() {
     },
     [photos]
   );
+
+  // Auto-center the first match if user opened spacegrep with a pre-loaded URL query (?q=...)
+  useEffect(() => {
+    if (initialQuery && !hasAutoCenteredRef.current && orderedMatches.length > 0) {
+      const first = orderedMatches[0];
+      scrollToBin(first.photoId, first.binId);
+      hasAutoCenteredRef.current = true;
+    }
+  }, [initialQuery, orderedMatches, scrollToBin]);
 
   // Cycle matches forward ('next') or backward ('prev')
   const cycleMatch = useCallback(
@@ -206,6 +232,18 @@ export function App() {
     setActiveMatchIndex(null);
     queryCounter.current += 1;
     const queryId = queryCounter.current;
+
+    // Sync URL query parameter without full page reload
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (newQuery.trim()) {
+        url.searchParams.set('q', newQuery.trim());
+      } else {
+        url.searchParams.delete('q');
+        url.searchParams.delete('search');
+      }
+      window.history.replaceState({}, '', url.toString());
+    }
 
     if (!newQuery.trim()) {
       setMatchesByBinId({});
@@ -341,9 +379,9 @@ export function App() {
     }
   }, [orderedMatches.length, activeMatchIndex]);
 
-  // Kiosk inactivity timer
+  // Kiosk inactivity timer: disabled if user arrived via pre-loaded URL search query (?q= or ?search=)
   useEffect(() => {
-    if (!kioskEnabled) return;
+    if (!kioskEnabled || hasUrlQuery) return;
 
     const resetTimer = () => {
       setKioskSecondsRemaining(KIOSK_TIMEOUT_SECONDS);
@@ -371,7 +409,7 @@ export function App() {
       clearInterval(interval);
       userActivityEvents.forEach((evt) => window.removeEventListener(evt, resetTimer));
     };
-  }, [kioskEnabled, searchQuery, resetKiosk]);
+  }, [kioskEnabled, hasUrlQuery, searchQuery, resetKiosk]);
 
   // Fullscreen toggle handler
   const handleToggleFullscreen = () => {
@@ -652,7 +690,7 @@ export function App() {
         activeMatchIndex={activeMatchIndex}
         onEnter={handleSearchEnter}
         kioskSecondsRemaining={kioskSecondsRemaining}
-        kioskEnabled={kioskEnabled}
+        kioskEnabled={kioskEnabled && !hasUrlQuery}
         onToggleKiosk={() => setKioskEnabled(!kioskEnabled)}
         onOpenUpload={handleOpenUpload}
         isFullscreen={isFullscreen}

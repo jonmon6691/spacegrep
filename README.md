@@ -54,6 +54,10 @@ Key configuration options:
 - `ADMIN_PASSWORD`: Admin password required to upload new shelf photos or modify shelves in the web UI. If left blank, web uploads and shelf modifications are disabled (read-only kiosk mode).
 - `GEMINI_MODEL`: Gemini model for vision detection (defaults to `gemini-3.6-flash`).
 - `WHITEBOX_LOGO_URL` / `WHITEBOX_LINK_URL`: Optional custom SVG/image logo and link URL for white-labeling the top omnibar.
+- `SLACK_BOT_TOKEN`: Optional Slack Bot User OAuth Token (`xoxb-...`) to enable the Slack integration.
+- `SLACK_APP_TOKEN`: Slack App-Level Token (`xapp-...`) with `connections:write` scope for Socket Mode.
+- `SLACK_CHANNEL_ID`: The specific Slack channel ID to monitor for photo uploads and queries (e.g. `C0123456789`).
+- `SPACEGREP_BASE_URL`: Public base URL used when constructing clickable search links sent in Slack thread replies (defaults to `http://localhost:8000`).
 
 ### 4. Run the Appliance
 ```bash
@@ -105,6 +109,29 @@ There are two easy ways to add photos of your workshop shelves:
 1. Click **Upload Shelf** in the top omnibar (enter your admin password if prompted).
 2. Drag and drop any shelf photo.
 3. Watch the real-time progress banner (streamed via SSE) as Gemini detects bounding boxes, extracts labels, and indexes semantic tags across image tiles. The shelf will appear in the stream immediately.
+
+### Method 3: Slack Bot Upload (Channel Integration)
+Upload shelf photos or updates directly from your workshop Slack channel:
+1. Configure `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_CHANNEL_ID` in your `.env`.
+2. Post or drag any shelf photo directly into the designated Slack channel.
+3. The bot reacts with `:eyes:` to acknowledge receipt.
+4. Gemini inspects the photo for community guidelines (reminding members of policy if visible faces or blurry lighting are detected) and determines whether the photo is an updated angle/reorganization of an existing shelf or an entirely new shelf.
+5. Once ingested, the reaction transitions to `:white_check_mark:` and the bot thread-replies with the count of detected bins and a direct link to view the shelf live in Spacegrep!
+
+---
+
+## Slack Location Search ("Where is X?")
+
+Members in your workshop Slack channel can quickly ask where tools or components are stored:
+- Example queries:
+  - `"Where is the kapton tape?"`
+  - `"Where are 10k resistors?"`
+  - `"Where can I find ESP32?"`
+  - `"@spacegrep find multimeter"`
+- The bot replies in the thread with an inventory summary and a constructed URL (e.g. `https://spacegrep.lan/?q=kapton+tape`).
+- Clicking the link takes the user directly to Spacegrep with their search query pre-loaded, the matching bins highlighted, and smoothly centered. Kiosk auto-reset is automatically paused for deep-linked search sessions.
+
+---
 
 ### Managing Existing Shelves
 When authenticated as an admin, each shelf card features a quick-action menu (•••) allowing you to:
