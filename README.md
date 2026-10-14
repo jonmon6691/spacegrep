@@ -19,6 +19,7 @@ spacegrep is a lightweight, self-contained visual inventory search appliance for
 - **Shelf Management:** Reorder shelves to match your physical workshop layout, rename shelves, or update photos without losing shelf positions.
 - **Password-Protected Admin Mode:** Restricts photo uploading, reordering, and shelf deletion behind an admin password to protect shared workshop terminals.
 - **Kiosk Auto-Reset:** Configurable 60-second inactivity reset timer for shared workshop terminals. Clears the search bar and smoothly scrolls to top when idle.
+- **Slack Bot Integration:** Upload or replace workshop shelf photos directly from Slack with automatic visual shelf matching, emoji reaction tracking (:eyes: -> :white_check_mark:), and instant natural language "Where is X?" searches that generate pre-loaded web links.
 - **Appliance-Grade Deployment:** Self-contained, turnkey deployment with persistent local storage for all photos and catalog data.
 
 ---
@@ -56,7 +57,6 @@ Key configuration options:
 - `WHITEBOX_LOGO_URL` / `WHITEBOX_LINK_URL`: Optional custom SVG/image logo and link URL for white-labeling the top omnibar.
 - `SLACK_BOT_TOKEN`: Optional Slack Bot User OAuth Token (`xoxb-...`) to enable the Slack integration.
 - `SLACK_APP_TOKEN`: Slack App-Level Token (`xapp-...`) with `connections:write` scope for Socket Mode.
-- `SLACK_CHANNEL_ID`: The specific Slack channel ID to monitor for photo uploads and queries (e.g. `C0123456789`).
 - `SPACEGREP_BASE_URL`: Public base URL used when constructing clickable search links sent in Slack thread replies (defaults to `http://localhost:8000`).
 
 ### 4. Run the Appliance
@@ -111,9 +111,9 @@ There are two easy ways to add photos of your workshop shelves:
 3. Watch the real-time progress banner (streamed via SSE) as Gemini detects bounding boxes, extracts labels, and indexes semantic tags across image tiles. The shelf will appear in the stream immediately.
 
 ### Method 3: Slack Bot Upload (Channel Integration)
-Upload shelf photos or updates directly from your workshop Slack channel:
-1. Configure `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_CHANNEL_ID` in your `.env`.
-2. Post or drag any shelf photo directly into the designated Slack channel.
+Upload shelf photos or updates directly from any workshop Slack channel where the bot is invited:
+1. Configure `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in your `.env`.
+2. Invite the bot to your workshop channel (`/invite @spacegrep`) and upload or drag any shelf photo into the channel.
 3. The bot reacts with `:eyes:` to acknowledge receipt.
 4. Gemini inspects the photo for community guidelines (reminding members of policy if visible faces or blurry lighting are detected) and determines whether the photo is an updated angle/reorganization of an existing shelf or an entirely new shelf.
 5. Once ingested, the reaction transitions to `:white_check_mark:` and the bot thread-replies with the count of detected bins and a direct link to view the shelf live in Spacegrep!

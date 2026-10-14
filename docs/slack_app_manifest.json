@@ -14,10 +14,8 @@
     "scopes": {
       "bot": [
         "channels:history",
-        "channels:read",
         "chat:write",
         "files:read",
-        "reactions:read",
         "reactions:write",
         "app_mentions:read"
       ]

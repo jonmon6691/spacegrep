@@ -29,11 +29,6 @@ def create_slack_app() -> Optional[AsyncApp]:
     async def on_message(body, client):
         event = body.get("event", {})
         channel = event.get("channel")
-        monitored_channel = os.getenv("SLACK_CHANNEL_ID", "").strip()
-
-        # Channel isolation: ignore messages outside the designated channel
-        if monitored_channel and channel != monitored_channel:
-            return
 
         # Avoid processing bot's own messages or sub-events
         if event.get("bot_id") or event.get("subtype") in ("bot_message", "message_deleted"):
@@ -74,11 +69,6 @@ def create_slack_app() -> Optional[AsyncApp]:
     async def on_app_mention(body, client):
         event = body.get("event", {})
         channel = event.get("channel")
-        monitored_channel = os.getenv("SLACK_CHANNEL_ID", "").strip()
-
-        if monitored_channel and channel != monitored_channel:
-            return
-
         message_ts = event.get("ts")
         text = event.get("text", "")
         query = parse_location_query(text)
@@ -101,7 +91,6 @@ async def start_slack_bot() -> bool:
 
     bot_token = os.getenv("SLACK_BOT_TOKEN", "").strip()
     app_token = os.getenv("SLACK_APP_TOKEN", "").strip()
-    monitored_channel = os.getenv("SLACK_CHANNEL_ID", "").strip()
 
     if not bot_token or not app_token:
         logger.info(
@@ -116,10 +105,7 @@ async def start_slack_bot() -> bool:
 
         _socket_handler = AsyncSocketModeHandler(_slack_app, app_token)
         _runner_task = asyncio.create_task(_socket_handler.start_async())
-        logger.info(
-            "Slack Socket Mode started. Monitoring channel ID: '%s'",
-            monitored_channel or "ALL (unrestricted)",
-        )
+        logger.info("Slack Socket Mode started.")
         return True
     except Exception as e:
         logger.exception("Failed to start Slack Socket Mode handler: %s", e)

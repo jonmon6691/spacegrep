@@ -23,7 +23,6 @@ services:
       # Slack Socket Mode Integration
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
-      - SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID:-}
       - SPACEGREP_BASE_URL=${SPACEGREP_BASE_URL:-}
 
   caddy:
