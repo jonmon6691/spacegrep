@@ -1,8 +1,6 @@
 import hashlib
 import os
-import shutil
 import tempfile
-from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -14,11 +12,14 @@ os.environ["DATA_DIR"] = test_dir
 
 from backend.database import (
     get_data_dir,
+    get_db_connection,
     get_manifest,
     get_photo,
+    get_photo_by_hash,
     init_db,
     insert_bin,
     insert_photo,
+    update_photo_name,
 )
 from backend.ingestion import (
     calculate_iou,
@@ -30,18 +31,41 @@ from backend.ingestion import (
     suppress_duplicate_bins,
 )
 from backend.models import GeminiDetectedBin
-from backend.ingest_manager import ingest_manager, IngestJob, pick_encouragement
-from backend.main import app, _ip_request_timestamps, _failed_login_attempts, generate_admin_token
-from backend.seed import auto_seed, enqueue_seed_photos, generate_default_sample_shelf_photo
+from backend.ingest_manager import ingest_manager, pick_encouragement
+from backend.main import (
+    app,
+    _ip_llm_timestamps,
+    _ip_lightweight_timestamps,
+    _failed_login_attempts,
+    generate_admin_token,
+)
+from backend.seed import auto_seed, enqueue_seed_photos
 
 
 @pytest.fixture(autouse=True)
 def setup_and_teardown():
     init_db()
-    _ip_request_timestamps.clear()
+    conn = get_db_connection()
+    with conn:
+        conn.execute("DELETE FROM bins;")
+        conn.execute("DELETE FROM photos;")
+    conn.close()
+    seed_dir = get_data_dir() / "seed_photos"
+    if seed_dir.exists():
+        for f in seed_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+    img_dir = get_data_dir() / "images"
+    if img_dir.exists():
+        for f in img_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+    _ip_llm_timestamps.clear()
+    _ip_lightweight_timestamps.clear()
     _failed_login_attempts.clear()
     yield
-    _ip_request_timestamps.clear()
+    _ip_llm_timestamps.clear()
+    _ip_lightweight_timestamps.clear()
     _failed_login_attempts.clear()
 
 
@@ -329,21 +353,30 @@ def test_admin_rate_limiting(monkeypatch):
     assert login_res.status_code == 200
     token = login_res.json()["token"]
 
-    # 10 requests should succeed or return valid status (e.g. 404 for non-existent photo)
+    # 10 LLM / upload requests should be processed (e.g. returning 400 for invalid file type)
     for i in range(10):
-        r = client.delete(
-            f"/api/photos/non-existent-{i}",
+        r = client.post(
+            "/api/photos",
             headers={"Authorization": f"Bearer {token}"},
+            files={"file": (f"test-{i}.txt", b"not an image", "text/plain")},
         )
-        assert r.status_code in (404, 200)
+        assert r.status_code in (400, 202)
 
-    # 11th request should be rate-limited (429)
-    r_blocked = client.delete(
-        "/api/photos/non-existent-11",
+    # 11th request to LLM upload endpoint should be rate-limited (429)
+    r_blocked = client.post(
+        "/api/photos",
         headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("test-11.txt", b"not an image", "text/plain")},
     )
     assert r_blocked.status_code == 429
     assert "rate limit exceeded" in r_blocked.json()["detail"].lower()
+
+    # In contrast, lightweight operations (delete, rename, move) use the generous lightweight limiter and are not blocked
+    del_res = client.delete(
+        "/api/photos/non-existent-test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_res.status_code == 404
 
 
 def test_image_dimension_safety():
@@ -580,7 +613,309 @@ def test_enqueue_seed_photos_non_blocking():
     assert queued >= 0
 
 
+def test_rename_photo(monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-pass-123")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    photo = insert_photo(
+        photo_id="photo-rename-1",
+        filename="photo-rename-1.jpg",
+        original_name="old_shelf_name.jpg",
+        width=1000,
+        height=800,
+    )
+
+    # Unauthenticated rename fails (401)
+    unauth = client.patch(
+        f"/api/photos/{photo['id']}",
+        json={"name": "new_shelf_name.jpg"},
+    )
+    assert unauth.status_code == 401
+
+    # Authenticated rename succeeds (200)
+    auth_res = client.patch(
+        f"/api/photos/{photo['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "new_shelf_name.jpg"},
+    )
+    assert auth_res.status_code == 200
+    data = auth_res.json()
+    assert data["status"] == "renamed"
+    assert data["photo"]["original_name"] == "new_shelf_name.jpg"
+
+    # Empty name fails (422 or 400)
+    empty_res = client.patch(
+        f"/api/photos/{photo['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "   "},
+    )
+    assert empty_res.status_code in (400, 422)
 
 
+def test_move_photo(monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-pass-123")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    # Clear and insert three photos with known order
+    p1 = insert_photo("p-move-1", "p1.jpg", "First.jpg", 100, 100, order_index=0)
+    p2 = insert_photo("p-move-2", "p2.jpg", "Second.jpg", 100, 100, order_index=1)
+    p3 = insert_photo("p-move-3", "p3.jpg", "Third.jpg", 100, 100, order_index=2)
+
+    # Unauthenticated move fails
+    unauth = client.post(
+        f"/api/photos/{p2['id']}/move",
+        json={"direction": "up"},
+    )
+    assert unauth.status_code == 401
+
+    # Move p2 up: should swap p2 and p1
+    res = client.post(
+        f"/api/photos/{p2['id']}/move",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"direction": "up"},
+    )
+    assert res.status_code == 200
+    manifest = res.json()["photos"]
+    ids_in_manifest = [p["id"] for p in manifest if p["id"] in ("p-move-1", "p-move-2", "p-move-3")]
+    assert ids_in_manifest == ["p-move-2", "p-move-1", "p-move-3"]
+
+    # Move p2 down: should swap back with p1
+    res_down = client.post(
+        f"/api/photos/{p2['id']}/move",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"direction": "down"},
+    )
+    assert res_down.status_code == 200
+    manifest_down = res_down.json()["photos"]
+    ids_down = [p["id"] for p in manifest_down if p["id"] in ("p-move-1", "p-move-2", "p-move-3")]
+    assert ids_down == ["p-move-1", "p-move-2", "p-move-3"]
+
+    # Verify that rapid reordering allows more than 10 requests without hitting 429
+    for i in range(15):
+        dir_choice = "down" if i % 2 == 0 else "up"
+        r_rapid = client.post(
+            f"/api/photos/{p2['id']}/move",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"direction": dir_choice},
+        )
+        assert r_rapid.status_code == 200
 
 
+def test_replace_photo(monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-pass-123")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    photo = insert_photo("p-replace-1", "p-replace-1.jpg", "Original.jpg", 400, 400, order_index=5)
+    insert_bin("b-old-1", photo["id"], "Old Part", ["old"], [0.1, 0.1, 0.2, 0.2])
+
+    # Create dummy new image
+    img = Image.new("RGB", (600, 500), color=(50, 120, 180))
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    new_img_bytes = buf.getvalue()
+
+    # Unauthenticated replace fails (401)
+    unauth = client.post(
+        f"/api/photos/{photo['id']}/replace",
+        files={"file": ("new_shelf.jpg", io.BytesIO(new_img_bytes), "image/jpeg")},
+    )
+    assert unauth.status_code == 401
+
+    # Synchronous replace succeeds
+    res = client.post(
+        f"/api/photos/{photo['id']}/replace?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("new_shelf.jpg", io.BytesIO(new_img_bytes), "image/jpeg")},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "replaced"
+    updated_photo = data["photo"]
+    assert updated_photo["id"] == photo["id"]
+    assert updated_photo["width"] == 600
+    assert updated_photo["height"] == 500
+    assert updated_photo["original_name"] == "Original.jpg"
+    assert updated_photo["order_index"] == 5
+
+
+def test_hash_deduplication_on_seed_when_renamed(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    seed_dir = get_data_dir() / "seed_photos"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create dummy seed photo
+    test_seed_path = seed_dir / "my_custom_seed.jpg"
+    img = Image.new("RGB", (300, 300), color=(12, 34, 56))
+    img.save(test_seed_path, format="JPEG")
+
+    # Initial auto_seed ingests the photo
+    ingested = auto_seed()
+    assert ingested == 1
+
+    manifest = get_manifest()
+    assert len(manifest) == 1
+    photo = manifest[0]
+    assert photo["original_name"] == "my_custom_seed.jpg"
+    assert photo["image_hash"] is not None
+
+    # Verify get_photo_by_hash finds it
+    by_hash = get_photo_by_hash(photo["image_hash"])
+    assert by_hash is not None
+    assert by_hash["id"] == photo["id"]
+
+    # User renames photo in the UI
+    renamed = update_photo_name(photo["id"], "My Cool Organizer")
+    assert renamed is not None
+    assert renamed["original_name"] == "My Cool Organizer"
+
+    # Server restarts: auto_seed runs again
+    ingested_after_rename = auto_seed()
+    assert ingested_after_rename == 0  # deduplicated by hash!
+
+    # Background seed enqueue also skips
+    enqueued_after_rename = enqueue_seed_photos(ingest_manager)
+    assert enqueued_after_rename == 0  # deduplicated by hash!
+
+    # Manifest still contains exactly 1 photo with the user's custom name
+    manifest_after = get_manifest()
+    assert len(manifest_after) == 1
+    assert manifest_after[0]["id"] == photo["id"]
+    assert manifest_after[0]["original_name"] == "My Cool Organizer"
+
+
+def test_upload_duplicate_photo_returns_409(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("ADMIN_PASSWORD", "supersecret123")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    # Create distinct test image
+    img = Image.new("RGB", (250, 250), color=(88, 120, 200))
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    img_bytes = buf.getvalue()
+
+    # First upload succeeds (201)
+    res1 = client.post(
+        "/api/photos?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shelf_original.jpg", io.BytesIO(img_bytes), "image/jpeg")},
+    )
+    assert res1.status_code == 201
+    photo1 = res1.json()["photo"]
+
+    # Re-uploading exact same image (even with different name) returns 409 Conflict
+    res2 = client.post(
+        "/api/photos?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shelf_duplicate.jpg", io.BytesIO(img_bytes), "image/jpeg")},
+    )
+    assert res2.status_code == 409
+    assert "already been indexed" in res2.json()["detail"].lower()
+
+    # Async upload of exact same image also returns 409 Conflict
+    res3 = client.post(
+        "/api/photos",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shelf_duplicate_async.jpg", io.BytesIO(img_bytes), "image/jpeg")},
+    )
+    assert res3.status_code == 409
+    assert "already been indexed" in res3.json()["detail"].lower()
+
+
+def test_replace_duplicate_photo_validation(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("ADMIN_PASSWORD", "supersecret123")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    # Image A
+    img_a = Image.new("RGB", (200, 200), color=(10, 20, 30))
+    import io
+    buf_a = io.BytesIO()
+    img_a.save(buf_a, format="JPEG")
+    bytes_a = buf_a.getvalue()
+
+    # Image B
+    img_b = Image.new("RGB", (200, 200), color=(40, 50, 60))
+    buf_b = io.BytesIO()
+    img_b.save(buf_b, format="JPEG")
+    bytes_b = buf_b.getvalue()
+
+    # Upload Photo A
+    res_a = client.post(
+        "/api/photos?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shelf_a.jpg", io.BytesIO(bytes_a), "image/jpeg")},
+    )
+    assert res_a.status_code == 201
+    photo_a = res_a.json()["photo"]
+
+    # Upload Photo B
+    res_b = client.post(
+        "/api/photos?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shelf_b.jpg", io.BytesIO(bytes_b), "image/jpeg")},
+    )
+    assert res_b.status_code == 201
+    photo_b = res_b.json()["photo"]
+
+    # Attempting to replace Photo B with Photo A's image returns 409 Conflict
+    res_dup = client.post(
+        f"/api/photos/{photo_b['id']}/replace?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("attempt_a.jpg", io.BytesIO(bytes_a), "image/jpeg")},
+    )
+    assert res_dup.status_code == 409
+    assert "already been indexed" in res_dup.json()["detail"].lower()
+
+    # Replacing Photo A with its own image succeeds (re-scan)
+    res_self = client.post(
+        f"/api/photos/{photo_a['id']}/replace?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("self_a.jpg", io.BytesIO(bytes_a), "image/jpeg")},
+    )
+    assert res_self.status_code == 200
+
+
+def test_replace_photo_preserves_bins_on_vision_failure(monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-pass-123")
+    client = TestClient(app)
+    token = generate_admin_token()
+
+    photo = insert_photo("p-fail-1", "p-fail-1.jpg", "Original Shelf", 400, 400, order_index=2)
+    insert_bin("b-original-1", photo["id"], "Preserved Bin", ["keep_me"], [0.2, 0.2, 0.4, 0.4])
+
+    img = Image.new("RGB", (300, 300), color=(111, 222, 111))
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    new_bytes = buf.getvalue()
+
+    def mock_fail(*args, **kwargs):
+        raise RuntimeError("Gemini Vision AI network timeout")
+
+    monkeypatch.setattr("backend.ingestion.detect_bins_tiled", mock_fail)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key-for-test")
+    monkeypatch.setenv("ALLOW_MOCK_FALLBACK", "0")
+
+    # Attempt replace which fails during vision AI detection
+    res = client.post(
+        f"/api/photos/{photo['id']}/replace?sync=true",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("failing_shelf.jpg", io.BytesIO(new_bytes), "image/jpeg")},
+    )
+    assert res.status_code == 500
+
+    # Verify that existing photo record and bins were NOT deleted or corrupted
+    photo_after = get_photo(photo["id"])
+    assert photo_after is not None
+    assert photo_after["original_name"] == "Original Shelf"
+    assert len(photo_after["bins"]) == 1
+    assert photo_after["bins"][0]["id"] == "b-original-1"

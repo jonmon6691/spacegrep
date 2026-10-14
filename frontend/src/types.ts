@@ -13,6 +13,8 @@ export interface Photo {
   width: number;
   height: number;
   created_at: string;
+  order_index?: number;
+  image_hash?: string;
   bins: Bin[];
 }
 

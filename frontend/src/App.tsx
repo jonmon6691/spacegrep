@@ -5,6 +5,11 @@ import { ShelfStream } from './components/ShelfStream';
 import { RadarIndicators } from './components/RadarIndicators';
 import { UploadModal } from './components/UploadModal';
 import { IngestBanner } from './components/IngestBanner';
+import { AdminAuthModal, type AdminActionType } from './components/AdminAuthModal';
+import { RenameModal } from './components/RenameModal';
+import { ReplaceModal } from './components/ReplaceModal';
+import { DeleteConfirmModal } from './components/DeleteConfirmModal';
+import { getStoredToken, clearStoredToken } from './utils/auth';
 
 const KIOSK_TIMEOUT_SECONDS = 60;
 
@@ -26,6 +31,18 @@ export function App() {
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [bannerHeight, setBannerHeight] = useState(0);
+
+  // Admin auth & shelf action modal states
+  const [authModalState, setAuthModalState] = useState<{
+    isOpen: boolean;
+    actionType: AdminActionType;
+    photo: Photo | null;
+    initialError?: string;
+  } | null>(null);
+  const [renameModalPhoto, setRenameModalPhoto] = useState<Photo | null>(null);
+  const [replaceModalPhoto, setReplaceModalPhoto] = useState<Photo | null>(null);
+  const [deleteConfirmPhoto, setDeleteConfirmPhoto] = useState<Photo | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // References
   const workerRef = useRef<Worker | null>(null);
@@ -266,7 +283,14 @@ export function App() {
   // Global hotkeys for 'q' (reset), 'n' (next match), 'N' (prev match), and 'Space'/'Shift+Space' (image boundaries)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (isUploadOpen) return;
+      const isAnyModalOpen =
+        isUploadOpen ||
+        Boolean(authModalState?.isOpen) ||
+        Boolean(renameModalPhoto) ||
+        Boolean(replaceModalPhoto) ||
+        Boolean(deleteConfirmPhoto);
+
+      if (isAnyModalOpen) return;
 
       // Ignore if focused on an input, textarea, or contentEditable
       const activeEl = document.activeElement as HTMLElement | null;
@@ -297,7 +321,16 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isUploadOpen, resetKiosk, cycleMatch, scrollToShelfBoundary]);
+  }, [
+    isUploadOpen,
+    authModalState,
+    renameModalPhoto,
+    replaceModalPhoto,
+    deleteConfirmPhoto,
+    resetKiosk,
+    cycleMatch,
+    scrollToShelfBoundary,
+  ]);
 
   // Keep activeMatchIndex in bounds if results update
   useEffect(() => {
@@ -359,10 +392,24 @@ export function App() {
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
-  // Handlers for upload modal
+  // Handlers for upload and photo management
+  const refreshSearchIfActive = useCallback(() => {
+    if (searchQuery.trim() && workerRef.current) {
+      queryCounter.current += 1;
+      workerRef.current.postMessage({
+        type: 'SEARCH',
+        query: searchQuery,
+        queryId: queryCounter.current,
+      });
+    }
+  }, [searchQuery]);
+
   const handleUploadSuccess = (newPhoto: Photo) => {
     setPhotos((prev) => {
-      const updated = [...prev, newPhoto];
+      const exists = prev.some((p) => p.id === newPhoto.id);
+      const updated = exists
+        ? prev.map((p) => (p.id === newPhoto.id ? newPhoto : p))
+        : [...prev, newPhoto];
       if (workerRef.current) {
         workerRef.current.postMessage({
           type: 'INIT_MANIFEST',
@@ -371,6 +418,21 @@ export function App() {
       }
       return updated;
     });
+    refreshSearchIfActive();
+  };
+
+  const handleRenameSuccess = (updatedPhoto: Photo) => {
+    setPhotos((prev) => {
+      const updated = prev.map((p) => (p.id === updatedPhoto.id ? updatedPhoto : p));
+      if (workerRef.current) {
+        workerRef.current.postMessage({
+          type: 'INIT_MANIFEST',
+          manifest: updated,
+        });
+      }
+      return updated;
+    });
+    refreshSearchIfActive();
   };
 
   const handleDeleteSuccess = (photoId: string) => {
@@ -384,6 +446,191 @@ export function App() {
       }
       return updated;
     });
+    refreshSearchIfActive();
+  };
+
+  const executeMove = async (photoId: string, direction: 'up' | 'down', token: string) => {
+    // Optimistically update photo order in local state for instantaneous feedback
+    setPhotos((prev) => {
+      const idx = prev.findIndex((p) => p.id === photoId);
+      if (idx === -1) return prev;
+      if (direction === 'up' && idx === 0) return prev;
+      if (direction === 'down' && idx === prev.length - 1) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      const copy = [...prev];
+      const temp = copy[idx];
+      copy[idx] = copy[targetIdx];
+      copy[targetIdx] = temp;
+      return copy;
+    });
+
+    try {
+      const res = await fetch(`/api/photos/${photoId}/move`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ direction }),
+      });
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          clearStoredToken();
+          loadManifest();
+          const targetPhoto = photos.find((p) => p.id === photoId) || null;
+          setAuthModalState({
+            isOpen: true,
+            actionType: direction === 'up' ? 'move_up' : 'move_down',
+            photo: targetPhoto,
+            initialError: 'Admin session expired. Please enter password again.',
+          });
+          return;
+        }
+        console.error('Failed to move photo');
+        loadManifest();
+        return;
+      }
+
+      const data = await res.json();
+      if (data.photos) {
+        setPhotos(data.photos);
+        if (workerRef.current) {
+          workerRef.current.postMessage({
+            type: 'INIT_MANIFEST',
+            manifest: data.photos,
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error moving photo:', err);
+      loadManifest();
+    }
+  };
+
+  const executeDeletePhoto = async (photo: Photo, token: string) => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`/api/photos/${photo.id}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          clearStoredToken();
+          setIsDeleting(false);
+          setDeleteConfirmPhoto(null);
+          setAuthModalState({
+            isOpen: true,
+            actionType: 'delete',
+            photo,
+            initialError: 'Admin session expired. Please enter password again.',
+          });
+          return;
+        }
+        throw new Error('Failed to delete photo');
+      }
+
+      handleDeleteSuccess(photo.id);
+      setDeleteConfirmPhoto(null);
+    } catch (err) {
+      console.error('Delete error:', err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleRequestMove = (photo: Photo, direction: 'up' | 'down') => {
+    const token = getStoredToken();
+    if (!token) {
+      setAuthModalState({
+        isOpen: true,
+        actionType: direction === 'up' ? 'move_up' : 'move_down',
+        photo,
+      });
+      return;
+    }
+    executeMove(photo.id, direction, token);
+  };
+
+  const handleRequestRename = (photo: Photo) => {
+    const token = getStoredToken();
+    if (!token) {
+      setAuthModalState({
+        isOpen: true,
+        actionType: 'rename',
+        photo,
+      });
+      return;
+    }
+    setRenameModalPhoto(photo);
+  };
+
+  const handleRequestReplace = (photo: Photo) => {
+    const token = getStoredToken();
+    if (!token) {
+      setAuthModalState({
+        isOpen: true,
+        actionType: 'replace',
+        photo,
+      });
+      return;
+    }
+    setReplaceModalPhoto(photo);
+  };
+
+  const handleRequestDelete = (photo: Photo) => {
+    const token = getStoredToken();
+    if (!token) {
+      setAuthModalState({
+        isOpen: true,
+        actionType: 'delete',
+        photo,
+      });
+      return;
+    }
+    setDeleteConfirmPhoto(photo);
+  };
+
+  const handleOpenUpload = () => {
+    const token = getStoredToken();
+    if (!token) {
+      setAuthModalState({
+        isOpen: true,
+        actionType: 'upload',
+        photo: null,
+      });
+      return;
+    }
+    setIsUploadOpen(true);
+  };
+
+  const handleAuthSuccess = (token: string) => {
+    if (!authModalState) return;
+    const { actionType, photo } = authModalState;
+    setAuthModalState(null);
+
+    if (actionType === 'upload') {
+      setIsUploadOpen(true);
+      return;
+    }
+
+    if (!photo) return;
+
+    if (actionType === 'move_up') {
+      executeMove(photo.id, 'up', token);
+    } else if (actionType === 'move_down') {
+      executeMove(photo.id, 'down', token);
+    } else if (actionType === 'rename') {
+      setRenameModalPhoto(photo);
+    } else if (actionType === 'replace') {
+      setReplaceModalPhoto(photo);
+    } else if (actionType === 'delete') {
+      executeDeletePhoto(photo, token);
+    }
   };
 
   return (
@@ -407,7 +654,7 @@ export function App() {
         kioskSecondsRemaining={kioskSecondsRemaining}
         kioskEnabled={kioskEnabled}
         onToggleKiosk={() => setKioskEnabled(!kioskEnabled)}
-        onOpenUpload={() => setIsUploadOpen(true)}
+        onOpenUpload={handleOpenUpload}
         isFullscreen={isFullscreen}
         onToggleFullscreen={handleToggleFullscreen}
       />
@@ -424,7 +671,11 @@ export function App() {
           matchesByBinId={matchesByBinId}
           cardRefs={cardRefs}
           activeBinId={activeBinId}
-          onDeletePhoto={handleDeleteSuccess}
+          onMoveUp={(p) => handleRequestMove(p, 'up')}
+          onMoveDown={(p) => handleRequestMove(p, 'down')}
+          onRename={handleRequestRename}
+          onReplace={handleRequestReplace}
+          onDeletePhoto={handleRequestDelete}
         />
       )}
 
@@ -437,13 +688,89 @@ export function App() {
         onSelectBin={handleSelectBin}
       />
 
-      {/* Upload and Management Modal */}
+      {/* Add Shelf Photo Modal */}
       <UploadModal
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
-        photos={photos}
         onUploadSuccess={handleUploadSuccess}
-        onDeleteSuccess={handleDeleteSuccess}
+        onAuthExpired={() => {
+          setIsUploadOpen(false);
+          setAuthModalState({
+            isOpen: true,
+            actionType: 'upload',
+            photo: null,
+            initialError: 'Admin session expired. Please enter password again.',
+          });
+        }}
+      />
+
+      {/* Dropdown Action Admin Auth Modal */}
+      {authModalState && (
+        <AdminAuthModal
+          isOpen={authModalState.isOpen}
+          actionType={authModalState.actionType}
+          photoName={authModalState.photo?.original_name}
+          binsCount={authModalState.photo?.bins.length}
+          initialError={authModalState.initialError}
+          onSuccess={handleAuthSuccess}
+          onClose={() => setAuthModalState(null)}
+        />
+      )}
+
+      {/* Rename Modal */}
+      <RenameModal
+        isOpen={Boolean(renameModalPhoto)}
+        photo={renameModalPhoto}
+        onClose={() => setRenameModalPhoto(null)}
+        onSuccess={handleRenameSuccess}
+        onAuthExpired={(p) => {
+          setRenameModalPhoto(null);
+          setAuthModalState({
+            isOpen: true,
+            actionType: 'rename',
+            photo: p,
+            initialError: 'Admin session expired. Please enter password again.',
+          });
+        }}
+      />
+
+      {/* Replace Modal */}
+      <ReplaceModal
+        isOpen={Boolean(replaceModalPhoto)}
+        photo={replaceModalPhoto}
+        onClose={() => setReplaceModalPhoto(null)}
+        onSuccess={handleUploadSuccess}
+        onAuthExpired={(p) => {
+          setReplaceModalPhoto(null);
+          setAuthModalState({
+            isOpen: true,
+            actionType: 'replace',
+            photo: p,
+            initialError: 'Admin session expired. Please enter password again.',
+          });
+        }}
+      />
+
+      {/* Delete Confirmation Modal (when user was already authenticated) */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteConfirmPhoto)}
+        photo={deleteConfirmPhoto}
+        isDeleting={isDeleting}
+        onClose={() => setDeleteConfirmPhoto(null)}
+        onConfirm={() => {
+          const token = getStoredToken();
+          if (token && deleteConfirmPhoto) {
+            executeDeletePhoto(deleteConfirmPhoto, token);
+          } else if (deleteConfirmPhoto) {
+            const p = deleteConfirmPhoto;
+            setDeleteConfirmPhoto(null);
+            setAuthModalState({
+              isOpen: true,
+              actionType: 'delete',
+              photo: p,
+            });
+          }
+        }}
       />
     </div>
   );

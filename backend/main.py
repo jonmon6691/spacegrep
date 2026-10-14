@@ -29,12 +29,20 @@ from backend.database import (
     get_data_dir,
     get_manifest,
     get_photo,
+    get_photo_by_hash,
     init_db,
+    move_photo,
+    update_photo_name,
 )
 from backend.ingest_manager import ingest_manager
 from backend.ingestion import process_image
-from backend.models import LoginRequest, LoginResponse, UploadResponse
-from backend.seed import auto_seed, enqueue_seed_photos
+from backend.models import (
+    LoginRequest,
+    LoginResponse,
+    MovePhotoRequest,
+    RenamePhotoRequest,
+)
+from backend.seed import enqueue_seed_photos
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,10 +58,15 @@ if not SECRET_KEY:
 
 TOKEN_EXPIRE_SECONDS = 3600  # 1 hour
 
-# Rate limiting configuration: 10 requests per IP per minute on sensitive endpoints
-RATE_LIMIT_WINDOW = 60.0  # seconds
-RATE_LIMIT_MAX_REQUESTS = 10
-_ip_request_timestamps: dict[str, list[float]] = defaultdict(list)
+# Rate limiting configuration for expensive LLM / vision AI operations (upload, replace): 10 req/min
+LLM_RATE_LIMIT_WINDOW = 60.0  # seconds
+LLM_RATE_LIMIT_MAX_REQUESTS = 10
+_ip_llm_timestamps: dict[str, list[float]] = defaultdict(list)
+
+# Rate limiting for lightweight administrative operations (move, rename, delete): 120 req/min (2/sec)
+LIGHTWEIGHT_RATE_LIMIT_WINDOW = 60.0  # seconds
+LIGHTWEIGHT_RATE_LIMIT_MAX_REQUESTS = 120
+_ip_lightweight_timestamps: dict[str, list[float]] = defaultdict(list)
 
 # Rate limiting for failed login attempts: 5 failed attempts per IP within 5 minutes
 LOGIN_RATE_LIMIT_WINDOW = 300.0  # 5 minutes
@@ -65,18 +78,71 @@ MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
 CHUNK_SIZE = 1024 * 1024  # 1 MB chunks
 
 
-def check_rate_limit(request: Request) -> None:
+async def read_and_validate_upload_image(file: UploadFile) -> tuple[bytes, str]:
+    """Reads uploaded file chunks, validates size and image format, and returns bytes and sha256 hash."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image (jpeg, png, webp)",
+        )
+
+    contents = bytearray()
+    while chunk := await file.read(CHUNK_SIZE):
+        contents.extend(chunk)
+        if len(contents) > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File size exceeds maximum allowed limit (25MB)",
+            )
+
+    if len(contents) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty",
+        )
+
+    try:
+        with Image.open(io.BytesIO(contents)) as test_img:
+            test_img.verify()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or corrupt image file",
+        )
+
+    file_bytes_data = bytes(contents)
+    file_hash = hashlib.sha256(file_bytes_data).hexdigest()
+    return file_bytes_data, file_hash
+
+
+def check_llm_rate_limit(request: Request) -> None:
+    """Rate limits expensive Gemini Vision AI calls (upload, replace)."""
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
-    timestamps = _ip_request_timestamps[client_ip]
-    # Prune timestamps older than window
-    _ip_request_timestamps[client_ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
-    if len(_ip_request_timestamps[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+    timestamps = _ip_llm_timestamps[client_ip]
+    _ip_llm_timestamps[client_ip] = [t for t in timestamps if now - t < LLM_RATE_LIMIT_WINDOW]
+    if len(_ip_llm_timestamps[client_ip]) >= LLM_RATE_LIMIT_MAX_REQUESTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded. Maximum 10 requests per minute.",
+            detail="Rate limit exceeded for AI vision ingestion. Maximum 10 requests per minute.",
         )
-    _ip_request_timestamps[client_ip].append(now)
+    _ip_llm_timestamps[client_ip].append(now)
+
+
+def check_lightweight_rate_limit(request: Request) -> None:
+    """Rate limits lightweight administrative actions (move, rename, delete)."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    timestamps = _ip_lightweight_timestamps[client_ip]
+    _ip_lightweight_timestamps[client_ip] = [
+        t for t in timestamps if now - t < LIGHTWEIGHT_RATE_LIMIT_WINDOW
+    ]
+    if len(_ip_lightweight_timestamps[client_ip]) >= LIGHTWEIGHT_RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Action rate limit exceeded. Please wait a moment.",
+        )
+    _ip_lightweight_timestamps[client_ip].append(now)
 
 
 def check_login_rate_limit(request: Request) -> None:
@@ -246,7 +312,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -408,7 +474,7 @@ def login(request: Request, body: LoginRequest):
 
 @app.post(
     "/api/photos",
-    dependencies=[Depends(check_rate_limit), Depends(verify_admin_token)],
+    dependencies=[Depends(check_llm_rate_limit), Depends(verify_admin_token)],
 )
 async def upload_photo(
     response: Response,
@@ -420,45 +486,23 @@ async def upload_photo(
     By default, initiates asynchronous processing and returns HTTP 202 with a job_id.
     If sync=true is specified, runs synchronously and returns HTTP 201 with the completed photo record.
     """
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image (jpeg, png, webp)",
-        )
-
-    contents = bytearray()
-    while chunk := await file.read(CHUNK_SIZE):
-        contents.extend(chunk)
-        if len(contents) > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail="File size exceeds maximum allowed limit (25MB)",
-            )
-
-    if len(contents) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is empty",
-        )
-
-    # Validate image header and integrity with Pillow
-    try:
-        with Image.open(io.BytesIO(contents)) as test_img:
-            test_img.verify()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or corrupt image file",
-        )
-
+    file_bytes_data, file_hash = await read_and_validate_upload_image(file)
     filename = file.filename or "uploaded_shelf.jpg"
+
+    existing = get_photo_by_hash(file_hash)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This image has already been indexed as '{existing['original_name']}'. Duplicate upload skipped.",
+        )
 
     if sync:
         try:
             record = await asyncio.to_thread(
                 process_image,
-                file_bytes=bytes(contents),
+                file_bytes=file_bytes_data,
                 original_name=filename,
+                image_hash=file_hash,
             )
             response.status_code = status.HTTP_201_CREATED
             return {"status": "created", "photo": record}
@@ -478,7 +522,7 @@ async def upload_photo(
     # Asynchronous ingestion flow via IngestManager
     job = ingest_manager.create_job(
         original_name=filename,
-        file_bytes=bytes(contents),
+        file_bytes=file_bytes_data,
         is_seed=False,
     )
     response.status_code = status.HTTP_202_ACCEPTED
@@ -492,7 +536,7 @@ async def upload_photo(
 
 @app.delete(
     "/api/photos/{photo_id}",
-    dependencies=[Depends(check_rate_limit), Depends(verify_admin_token)],
+    dependencies=[Depends(check_lightweight_rate_limit), Depends(verify_admin_token)],
 )
 def delete_photo_endpoint(
     photo_id: str,
@@ -527,6 +571,140 @@ def delete_photo_endpoint(
         )
 
     return {"status": "deleted", "id": photo_id}
+
+
+@app.patch(
+    "/api/photos/{photo_id}",
+    dependencies=[Depends(check_lightweight_rate_limit), Depends(verify_admin_token)],
+)
+def rename_photo_endpoint(
+    photo_id: str,
+    body: RenamePhotoRequest,
+):
+    """Renames the original display name of a shelf photo."""
+    photo = get_photo(photo_id)
+    if not photo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Photo with id {photo_id} not found",
+        )
+
+    clean_name = body.name.strip()
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Photo name cannot be empty",
+        )
+
+    updated = update_photo_name(photo_id, clean_name)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update photo name in database",
+        )
+
+    return {"status": "renamed", "photo": updated}
+
+
+@app.post(
+    "/api/photos/{photo_id}/move",
+    dependencies=[Depends(check_lightweight_rate_limit), Depends(verify_admin_token)],
+)
+def move_photo_endpoint(
+    photo_id: str,
+    body: MovePhotoRequest,
+):
+    """Moves a shelf photo up or down in the display order."""
+    photo = get_photo(photo_id)
+    if not photo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Photo with id {photo_id} not found",
+        )
+
+    success = move_photo(photo_id, body.direction)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to move photo {body.direction}",
+        )
+
+    return {"status": "moved", "photos": get_manifest()}
+
+
+@app.post(
+    "/api/photos/{photo_id}/replace",
+    dependencies=[Depends(check_llm_rate_limit), Depends(verify_admin_token)],
+)
+@app.put(
+    "/api/photos/{photo_id}",
+    dependencies=[Depends(check_llm_rate_limit), Depends(verify_admin_token)],
+)
+async def replace_photo_endpoint(
+    photo_id: str,
+    response: Response,
+    file: UploadFile = File(...),
+    sync: bool = False,
+):
+    """
+    Replaces a shelf photo with a new image and re-runs bin detection.
+    Maintains the existing photo ID and display order.
+    """
+    photo = get_photo(photo_id)
+    if not photo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Photo with id {photo_id} not found",
+        )
+
+    file_bytes_data, file_hash = await read_and_validate_upload_image(file)
+    filename = photo["original_name"]
+
+    existing = get_photo_by_hash(file_hash)
+    if existing and existing["id"] != photo_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This image has already been indexed on shelf '{existing['original_name']}'. Duplicate replacement skipped.",
+        )
+
+    if sync:
+        try:
+            record = await asyncio.to_thread(
+                process_image,
+                file_bytes=file_bytes_data,
+                original_name=filename,
+                photo_id=photo_id,
+                is_replace=True,
+                image_hash=file_hash,
+            )
+            response.status_code = status.HTTP_200_OK
+            return {"status": "replaced", "photo": record}
+        except ValueError as ve:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(ve),
+            )
+        except Exception as e:
+            logger.exception("Failed to replace photo: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e),
+            )
+
+    job = ingest_manager.create_job(
+        original_name=filename,
+        file_bytes=file_bytes_data,
+        photo_id=photo_id,
+        is_seed=False,
+        is_replace=True,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return {
+        "status": "queued",
+        "job_id": job.job_id,
+        "photo_id": photo_id,
+        "message": f"Shelf photo replacement '{filename}' queued for processing.",
+    }
 
 
 # Mount image files

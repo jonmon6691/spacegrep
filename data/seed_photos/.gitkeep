@@ -1,3 +1,3 @@
 # Drop your workshop shelf photos (.jpg, .jpeg, .png, .webp) into this directory.
 # On startup, the system will automatically analyze, detect bins, transcribe labels,
-# generate semantic embeddings, and register them into the inventory database.
+# extract semantic tags, and register them into the inventory database.

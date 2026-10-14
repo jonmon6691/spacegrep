@@ -1,14 +1,14 @@
 import asyncio
+import hashlib
 import logging
-import os
 import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
-from backend.database import get_manifest, get_photo_by_original_name
+from backend.database import get_photo_by_hash
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ class IngestJob:
     updated_at: float = field(default_factory=time.time)
     photo_record: Optional[Dict[str, Any]] = None
     is_seed: bool = False
+    is_replace: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -105,23 +106,33 @@ class IngestManager:
         original_name: str,
         file_bytes: Optional[bytes] = None,
         file_path: Optional[Path] = None,
+        photo_id: Optional[str] = None,
         is_seed: bool = False,
+        is_replace: bool = False,
     ) -> IngestJob:
         job_id = str(uuid.uuid4())
-        photo_id = str(uuid.uuid4())
+        assigned_photo_id = photo_id or str(uuid.uuid4())
         job = IngestJob(
             job_id=job_id,
-            photo_id=photo_id,
+            photo_id=assigned_photo_id,
             original_name=original_name,
             status="queued",
             stage="queued",
             message=f"Queued {original_name} for ingestion",
             encouragement=pick_encouragement("preparing"),
             is_seed=is_seed,
+            is_replace=is_replace,
         )
         self.jobs[job_id] = job
         self._queue.put_nowait((job_id, file_bytes, file_path))
-        logger.info("Created ingest job %s for '%s' (seed=%s)", job_id, original_name, is_seed)
+        logger.info(
+            "Created ingest job %s for '%s' (photo_id=%s, seed=%s, replace=%s)",
+            job_id,
+            original_name,
+            assigned_photo_id,
+            is_seed,
+            is_replace,
+        )
         self._notify_subscribers(job)
         return job
 
@@ -288,6 +299,21 @@ class IngestManager:
                 if not file_bytes:
                     raise ValueError(f"No image bytes available for job {job_id}")
 
+                file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+                if job.is_seed:
+                    existing = get_photo_by_hash(file_hash)
+                    if existing:
+                        logger.info(
+                            "Seed job %s for '%s' already indexed as photo id %s ('%s'). Skipping vision processing.",
+                            job_id,
+                            job.original_name,
+                            existing["id"],
+                            existing["original_name"],
+                        )
+                        self.complete_job(job_id, existing)
+                        continue
+
                 # Progress callback adapter bridging sync ingestion to async updates
                 def progress_cb(
                     progress: int,
@@ -316,6 +342,8 @@ class IngestManager:
                     original_name=job.original_name,
                     photo_id=job.photo_id,
                     progress_callback=progress_cb,
+                    is_replace=job.is_replace,
+                    image_hash=file_hash,
                 )
 
                 self.complete_job(job_id, record)

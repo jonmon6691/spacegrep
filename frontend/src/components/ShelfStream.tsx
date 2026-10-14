@@ -7,7 +7,11 @@ interface ShelfStreamProps {
   matchesByBinId: Record<string, MatchResult>;
   cardRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
   activeBinId?: string | null;
-  onDeletePhoto?: (photoId: string) => void;
+  onMoveUp?: (photo: Photo) => void;
+  onMoveDown?: (photo: Photo) => void;
+  onRename?: (photo: Photo) => void;
+  onReplace?: (photo: Photo) => void;
+  onDeletePhoto?: (photo: Photo) => void;
 }
 
 export const ShelfStream: React.FC<ShelfStreamProps> = ({
@@ -15,6 +19,10 @@ export const ShelfStream: React.FC<ShelfStreamProps> = ({
   matchesByBinId,
   cardRefs,
   activeBinId,
+  onMoveUp,
+  onMoveDown,
+  onRename,
+  onReplace,
   onDeletePhoto,
 }) => {
   if (photos.length === 0) {
@@ -35,7 +43,7 @@ export const ShelfStream: React.FC<ShelfStreamProps> = ({
 
   return (
     <main className="w-full flex flex-col items-center pt-28 sm:pt-24 pb-32">
-      {photos.map((photo) => (
+      {photos.map((photo, index) => (
         <ShelfCard
           key={photo.id}
           ref={(el) => {
@@ -48,6 +56,12 @@ export const ShelfStream: React.FC<ShelfStreamProps> = ({
           photo={photo}
           matchesByBinId={matchesByBinId}
           activeBinId={activeBinId}
+          isFirst={index === 0}
+          isLast={index === photos.length - 1}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          onRename={onRename}
+          onReplace={onReplace}
           onDelete={onDeletePhoto}
         />
       ))}

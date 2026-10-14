@@ -1,16 +1,37 @@
 import { forwardRef } from 'react';
 import type { Photo, MatchResult } from '../types';
 import { HighlightOverlay } from './HighlightOverlay';
+import { ShelfMenu } from './ShelfMenu';
 
 interface ShelfCardProps {
   photo: Photo;
   matchesByBinId: Record<string, MatchResult>;
   activeBinId?: string | null;
-  onDelete?: (photoId: string) => void;
+  isFirst?: boolean;
+  isLast?: boolean;
+  onMoveUp?: (photo: Photo) => void;
+  onMoveDown?: (photo: Photo) => void;
+  onRename?: (photo: Photo) => void;
+  onReplace?: (photo: Photo) => void;
+  onDelete?: (photo: Photo) => void;
 }
 
 export const ShelfCard = forwardRef<HTMLDivElement, ShelfCardProps>(
-  ({ photo, matchesByBinId, activeBinId }, ref) => {
+  (
+    {
+      photo,
+      matchesByBinId,
+      activeBinId,
+      isFirst = false,
+      isLast = false,
+      onMoveUp,
+      onMoveDown,
+      onRename,
+      onReplace,
+      onDelete,
+    },
+    ref
+  ) => {
     const shelfMatches = photo.bins.filter((b) => Boolean(matchesByBinId[b.id]));
     const hasMatches = shelfMatches.length > 0;
 
@@ -23,7 +44,20 @@ export const ShelfCard = forwardRef<HTMLDivElement, ShelfCardProps>(
         {/* Subtle shelf header banner */}
         <div className="w-full max-w-7xl px-4 py-2 flex items-center justify-between text-xs text-slate-400 font-mono">
           <div className="flex items-center space-x-2">
-            <span className="inline-block w-2 h-2 rounded-full bg-slate-600" />
+            {onMoveUp && onMoveDown && onRename && onReplace && onDelete ? (
+              <ShelfMenu
+                photo={photo}
+                isFirst={isFirst}
+                isLast={isLast}
+                onMoveUp={onMoveUp}
+                onMoveDown={onMoveDown}
+                onRename={onRename}
+                onReplace={onReplace}
+                onDelete={onDelete}
+              />
+            ) : (
+              <span className="inline-block w-2 h-2 rounded-full bg-slate-600" />
+            )}
             <span className="font-semibold text-slate-300">{photo.original_name}</span>
             <span className="text-slate-500">({photo.bins.length} bins indexed)</span>
           </div>
@@ -40,7 +74,7 @@ export const ShelfCard = forwardRef<HTMLDivElement, ShelfCardProps>(
         {/* Full-width responsive image wrapper */}
         <div className="relative w-full max-w-7xl overflow-hidden shadow-2xl">
           <img
-            src={`/images/${photo.filename}`}
+            src={`/images/${photo.filename}?v=${photo.image_hash?.slice(0, 8) || photo.created_at}`}
             alt={photo.original_name}
             className="w-full h-auto block pointer-events-none"
             loading="eager"

@@ -20,7 +20,17 @@ class Photo(BaseModel):
     width: int
     height: int
     created_at: str
+    order_index: Optional[int] = 0
+    image_hash: Optional[str] = None
     bins: List[Bin] = Field(default_factory=list)
+
+
+class RenamePhotoRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255, description="New display name for the shelf photo")
+
+
+class MovePhotoRequest(BaseModel):
+    direction: str = Field(pattern="^(up|down)$", description="Move direction ('up' or 'down')")
 
 
 class ManifestResponse(BaseModel):
@@ -36,11 +46,6 @@ class GeminiDetectedBin(BaseModel):
         default_factory=list,
         description="3-5 functional keywords, synonyms, or use-cases",
     )
-
-
-class UploadResponse(BaseModel):
-    status: str
-    photo: Photo
 
 
 class SearchResult(BaseModel):

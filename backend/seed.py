@@ -1,14 +1,15 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import hashlib
 import logging
-import os
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from backend.database import (
     get_data_dir,
     get_manifest,
+    get_photo_by_hash,
     get_photo_by_original_name,
     init_db,
 )
@@ -119,16 +120,35 @@ def auto_seed(progress_callback=None):
 
     ingested_count = 0
     for file_path in sorted(seed_files):
-        existing = get_photo_by_original_name(file_path.name)
+        try:
+            with open(file_path, "rb") as f:
+                photo_bytes = f.read()
+        except Exception as e:
+            logger.error("Failed to read seed file %s: %s", file_path.name, e)
+            continue
+
+        file_hash = hashlib.sha256(photo_bytes).hexdigest()
+        existing = get_photo_by_hash(file_hash)
+        if existing is None:
+            existing = get_photo_by_original_name(file_path.name)
+
         if existing is not None:
-            logger.debug("Seed photo %s is already indexed in database. Skipping.", file_path.name)
+            logger.debug(
+                "Seed photo %s is already indexed in database (id=%s, name='%s'). Skipping.",
+                file_path.name,
+                existing["id"],
+                existing["original_name"],
+            )
             continue
 
         logger.info("Auto-ingesting new seed photo: %s", file_path.name)
         try:
-            with open(file_path, "rb") as f:
-                photo_bytes = f.read()
-            record = process_image(photo_bytes, original_name=file_path.name, progress_callback=progress_callback)
+            record = process_image(
+                photo_bytes,
+                original_name=file_path.name,
+                progress_callback=progress_callback,
+                image_hash=file_hash,
+            )
             bin_count = len(record.get("bins", []))
             logger.info("Successfully ingested %s (%d bins registered)", file_path.name, bin_count)
             ingested_count += 1
@@ -159,11 +179,34 @@ def enqueue_seed_photos(manager) -> int:
 
     queued_count = 0
     for file_path in sorted(seed_files):
-        existing = get_photo_by_original_name(file_path.name)
-        if existing is not None:
+        try:
+            with open(file_path, "rb") as f:
+                photo_bytes = f.read()
+        except Exception as e:
+            logger.error("Failed to read seed file %s: %s", file_path.name, e)
             continue
+
+        file_hash = hashlib.sha256(photo_bytes).hexdigest()
+        existing = get_photo_by_hash(file_hash)
+        if existing is None:
+            existing = get_photo_by_original_name(file_path.name)
+
+        if existing is not None:
+            logger.debug(
+                "Seed photo %s is already indexed in database (id=%s, name='%s'). Skipping.",
+                file_path.name,
+                existing["id"],
+                existing["original_name"],
+            )
+            continue
+
         logger.info("Enqueueing seed photo for background ingestion: %s", file_path.name)
-        manager.create_job(original_name=file_path.name, file_path=file_path, is_seed=True)
+        manager.create_job(
+            original_name=file_path.name,
+            file_bytes=photo_bytes,
+            file_path=file_path,
+            is_seed=True,
+        )
         queued_count += 1
 
     return queued_count

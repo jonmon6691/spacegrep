@@ -1,14 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import hashlib
 import json
 import logging
-import math
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageOps
@@ -16,8 +15,10 @@ from PIL import Image, ImageOps
 
 from backend.database import (
     get_data_dir,
+    get_photo,
     insert_bin,
     insert_photo,
+    update_photo_image,
 )
 from backend.models import GeminiDetectedBin
 
@@ -506,16 +507,20 @@ def process_image(
     gemini_model: Optional[str] = None,
     photo_id: Optional[str] = None,
     progress_callback: Optional[Any] = None,
+    is_replace: bool = False,
+    image_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Complete ingestion pipeline:
     1. Preprocesses image (EXIF orientation, storage, thumbnail).
     2. Runs bin detection via Gemini API or mock fallback.
-    3. Normalizes bounding boxes and computes FastEmbed dense vectors.
+    3. Normalizes bounding boxes and formats semantic tags.
     4. Commits records to SQLite database.
     """
     if progress_callback:
         progress_callback(5, "preparing", "Inspecting image headers and metadata...", 0)
+
+    computed_hash = image_hash or hashlib.sha256(file_bytes).hexdigest()
 
     data_dir = get_data_dir()
     images_dir = data_dir / "images"
@@ -560,15 +565,6 @@ def process_image(
     thumb_image = image.resize((thumb_width, thumb_height), Image.Resampling.LANCZOS)
     thumb_image.save(thumb_path, "JPEG", quality=85)
 
-    # Insert photo into database
-    photo_record = insert_photo(
-        photo_id=assigned_photo_id,
-        filename=filename,
-        original_name=original_name,
-        width=orig_width,
-        height=orig_height,
-    )
-
     # 2. Vision detection
     api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
     detected_bins: List[GeminiDetectedBin] = []
@@ -597,9 +593,29 @@ def process_image(
         if progress_callback:
             progress_callback(85, "deduplication", f"Mock detected {len(detected_bins)} bins.", len(detected_bins))
 
-    # 3. Coordinate normalization and bin record insertion
+    # 3. Coordinate normalization and database persistence
     if progress_callback:
         progress_callback(90, "saving", f"Saving {len(detected_bins)} bins to inventory database...", len(detected_bins))
+
+    # Insert or update photo in database only after successful vision detection
+    if is_replace:
+        photo_record = update_photo_image(
+            photo_id=assigned_photo_id,
+            filename=filename,
+            original_name=original_name,
+            width=orig_width,
+            height=orig_height,
+            image_hash=computed_hash,
+        )
+    else:
+        photo_record = insert_photo(
+            photo_id=assigned_photo_id,
+            filename=filename,
+            original_name=original_name,
+            width=orig_width,
+            height=orig_height,
+            image_hash=computed_hash,
+        )
 
     for b in detected_bins:
         bin_id = str(uuid.uuid4())
@@ -616,7 +632,6 @@ def process_image(
     if progress_callback:
         progress_callback(98, "saving", "Finalizing inventory records...", len(detected_bins))
 
-    from backend.database import get_photo
     final_record = get_photo(assigned_photo_id) or photo_record
 
     if progress_callback:
