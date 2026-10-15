@@ -71,7 +71,7 @@ async def handle_photo_upload(
             client,
             channel=channel,
             thread_ts=message_ts,
-            text=f"⛔ **Ingestion Failed:** Could not download attachment from Slack: {e}",
+            text=f"⛔ *Ingestion Failed:* Could not download attachment from Slack: {e}",
         )
         return
 
@@ -86,7 +86,7 @@ async def handle_photo_upload(
             client,
             channel=channel,
             thread_ts=message_ts,
-            text="⛔ **Ingestion Failed:** Invalid or corrupt image file. Please upload a clear JPG, PNG, or WebP photo.",
+            text="⛔ *Ingestion Failed:* Invalid or corrupt image file. Please upload a clear JPG, PNG, or WebP photo.",
         )
         return
 
@@ -128,7 +128,7 @@ async def handle_photo_upload(
             client,
             channel=channel,
             thread_ts=message_ts,
-            text=f"⛔ **Ingestion Failed:** Could not enqueue job: {e}",
+            text=f"⛔ *Ingestion Failed:* Could not enqueue job: {e}",
         )
         return
 
@@ -180,16 +180,18 @@ async def handle_photo_upload(
             else f"New Shelf: *{target_name}*"
         )
         reply_lines = [
-            "✅ **Accepted and Ingested!**",
-            f"Found and indexed **{bins_count} {'bin' if bins_count == 1 else 'bins'}** on {shelf_type}.",
-            f"👉 <{base_url}|Open in Spacegrep>",
+            f"Found {bins_count} {'bin' if bins_count == 1 else 'bins'} on {shelf_type}.",
+            f"<{base_url}|Open in Spacegrep>",
         ]
 
         if policy_result and policy_result.policy_warnings:
             reply_lines.append("")
-            reply_lines.append("⚠️ **Community Policy Notice:**")
-            for w in policy_result.policy_warnings:
-                reply_lines.append(f"• {w}")
+            reply_lines.append("⚠️ *Community Policy Notice:*")
+            if len(policy_result.policy_warnings) == 1:
+                reply_lines.append(policy_result.policy_warnings[0])
+            else:
+                for w in policy_result.policy_warnings:
+                    reply_lines.append(f"• {w}")
 
         await post_thread_reply(
             client,
@@ -209,5 +211,5 @@ async def handle_photo_upload(
             client,
             channel=channel,
             thread_ts=message_ts,
-            text=f"⛔ **Ingestion Failed:** {error_msg or 'An unexpected error occurred during processing.'}",
+            text=f"*Ingestion Failed:* {error_msg or 'An unexpected error occurred during processing.'}",
         )

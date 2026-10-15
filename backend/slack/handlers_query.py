@@ -96,22 +96,14 @@ async def handle_query_message(
     sample_labels = summary["sample_labels"]
 
     if total > 0:
-        shelves_text = ", ".join(f"*{s}*" for s in shelves[:3])
-        if len(shelves) > 3:
-            shelves_text += f" and {len(shelves) - 3} more"
-
-        sample_text = ""
-        if sample_labels:
-            sample_text = f"\n• Matching items: {', '.join(sample_labels[:4])}"
-
         reply = (
-            f"🔍 Found **{total} matching {'bin' if total == 1 else 'bins'}** for *\"{query}\"* on {shelves_text}.{sample_text}\n"
-            f"👉 <{target_url}|Click here to open Spacegrep with '{query}' pre-loaded and highlighted>"
+            f"Found {total} matching {'bin' if total == 1 else 'bins'} for \"{query}\".\n"
+            f"<{target_url}|Open in Spacegrep>"
         )
     else:
         reply = (
-            f"🔍 No bins currently indexed directly matching *\"{query}\"*.\n"
-            f"👉 <{target_url}|Click here to search the live workshop catalog in Spacegrep>"
+            f"No bins currently indexed directly matching \"{query}\".\n"
+            f"<{target_url}|Open in Spacegrep>"
         )
 
     await post_thread_reply(client, channel=channel, thread_ts=message_ts, text=reply)
