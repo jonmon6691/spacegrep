@@ -430,19 +430,25 @@ export function App() {
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
+  const searchQueryRef = useRef(searchQuery);
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
+
   // Handlers for upload and photo management
   const refreshSearchIfActive = useCallback(() => {
-    if (searchQuery.trim() && workerRef.current) {
+    const q = searchQueryRef.current.trim();
+    if (q && workerRef.current) {
       queryCounter.current += 1;
       workerRef.current.postMessage({
         type: 'SEARCH',
-        query: searchQuery,
+        query: q,
         queryId: queryCounter.current,
       });
     }
-  }, [searchQuery]);
+  }, []);
 
-  const handleUploadSuccess = (newPhoto: Photo) => {
+  const handleUploadSuccess = useCallback((newPhoto: Photo) => {
     setPhotos((prev) => {
       const exists = prev.some((p) => p.id === newPhoto.id);
       const updated = exists
@@ -457,7 +463,7 @@ export function App() {
       return updated;
     });
     refreshSearchIfActive();
-  };
+  }, [refreshSearchIfActive]);
 
   const handleRenameSuccess = (updatedPhoto: Photo) => {
     setPhotos((prev) => {

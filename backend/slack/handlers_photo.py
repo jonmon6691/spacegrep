@@ -37,6 +37,7 @@ async def handle_photo_upload(
     message_ts: str,
     file_info: Dict[str, Any],
     caption: str = "",
+    thread_ts: Optional[str] = None,
 ) -> None:
     """
     Handles a photo uploaded to the monitored channel:
@@ -45,8 +46,9 @@ async def handle_photo_upload(
     3. Runs community policy inspection (visible faces, blur, memes).
     4. Determines if photo replaces an existing shelf or is a new shelf.
     5. Submits to IngestManager and monitors progress.
-    6. On completion: transitions reaction to :white_check_mark: and replies in thread with bin count & policy alerts.
-    7. On fatal error: transitions reaction to :no_entry: and replies with error reason.
+    6. On completion: transitions reaction to :white_check_mark: and replies in thread with bin count.
+    7. If policy warnings exist: broadcasts community guidelines as a separate thread reply.
+    8. On fatal error: transitions reaction to :no_entry: and replies with error reason.
     """
     file_name = file_info.get("name") or "uploaded_shelf.jpg"
     mimetype = file_info.get("mimetype", "")
@@ -55,6 +57,8 @@ async def handle_photo_upload(
     if mimetype not in SUPPORTED_MIMETYPES or not download_url:
         logger.info("Ignoring file %s with unsupported mimetype '%s'", file_name, mimetype)
         return
+
+    target_thread_ts = thread_ts or message_ts
 
     # 1. Immediate visual feedback: :eyes:
     logger.info("Photo detected in channel %s (file: %s). Adding :eyes: reaction...", channel, file_name)
@@ -70,7 +74,7 @@ async def handle_photo_upload(
         await post_thread_reply(
             client,
             channel=channel,
-            thread_ts=message_ts,
+            thread_ts=target_thread_ts,
             text=f"⛔ *Ingestion Failed:* Could not download attachment from Slack: {e}",
         )
         return
@@ -85,7 +89,7 @@ async def handle_photo_upload(
         await post_thread_reply(
             client,
             channel=channel,
-            thread_ts=message_ts,
+            thread_ts=target_thread_ts,
             text="⛔ *Ingestion Failed:* Invalid or corrupt image file. Please upload a clear JPG, PNG, or WebP photo.",
         )
         return
@@ -127,7 +131,7 @@ async def handle_photo_upload(
         await post_thread_reply(
             client,
             channel=channel,
-            thread_ts=message_ts,
+            thread_ts=target_thread_ts,
             text=f"⛔ *Ingestion Failed:* Could not enqueue job: {e}",
         )
         return
@@ -184,21 +188,29 @@ async def handle_photo_upload(
             f"<{base_url}|Open in Spacegrep>",
         ]
 
-        if policy_result and policy_result.policy_warnings:
-            reply_lines.append("")
-            reply_lines.append("⚠️ *Community Policy Notice:*")
-            if len(policy_result.policy_warnings) == 1:
-                reply_lines.append(policy_result.policy_warnings[0])
-            else:
-                for w in policy_result.policy_warnings:
-                    reply_lines.append(f"• {w}")
-
         await post_thread_reply(
             client,
             channel=channel,
-            thread_ts=message_ts,
+            thread_ts=target_thread_ts,
             text="\n".join(reply_lines),
         )
+
+        # Community guidelines notice is posted as a separate message in the thread set as reply_broadcast
+        if policy_result and policy_result.policy_warnings:
+            guideline_lines = ["⚠️ *Community Policy Notice:*"]
+            if len(policy_result.policy_warnings) == 1:
+                guideline_lines.append(policy_result.policy_warnings[0])
+            else:
+                for w in policy_result.policy_warnings:
+                    guideline_lines.append(f"• {w}")
+
+            await post_thread_reply(
+                client,
+                channel=channel,
+                thread_ts=target_thread_ts,
+                text="\n".join(guideline_lines),
+                reply_broadcast=True,
+            )
     else:
         await transition_reaction(
             client,
@@ -210,6 +222,22 @@ async def handle_photo_upload(
         await post_thread_reply(
             client,
             channel=channel,
-            thread_ts=message_ts,
+            thread_ts=target_thread_ts,
             text=f"*Ingestion Failed:* {error_msg or 'An unexpected error occurred during processing.'}",
         )
+
+        if policy_result and policy_result.policy_warnings:
+            guideline_lines = ["⚠️ *Community Policy Notice:*"]
+            if len(policy_result.policy_warnings) == 1:
+                guideline_lines.append(policy_result.policy_warnings[0])
+            else:
+                for w in policy_result.policy_warnings:
+                    guideline_lines.append(f"• {w}")
+
+            await post_thread_reply(
+                client,
+                channel=channel,
+                thread_ts=target_thread_ts,
+                text="\n".join(guideline_lines),
+                reply_broadcast=True,
+            )

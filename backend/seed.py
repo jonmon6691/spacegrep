@@ -97,11 +97,19 @@ def generate_default_sample_shelf_photo(target_path: Path):
 
 def auto_seed(progress_callback=None):
     """
-    Scans ./data/seed_photos/ on boot and ingests any photos not yet present in the database.
+    Ingests initial seed photos if and only if the database is currently empty.
     If seed_photos/ is empty and database has no photos, creates a realistic demo shelf photo.
     Synchronous version used by CLI and tests.
     """
     init_db()
+    manifest = get_manifest()
+    if len(manifest) > 0:
+        logger.info(
+            "Database already contains %d photos. Skipping seed photos (only loaded when DB is empty).",
+            len(manifest),
+        )
+        return 0
+
     data_dir = get_data_dir()
     seed_dir = data_dir / "seed_photos"
     seed_dir.mkdir(parents=True, exist_ok=True)
@@ -109,10 +117,8 @@ def auto_seed(progress_callback=None):
     # Check existing files
     seed_files = [f for f in seed_dir.iterdir() if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS]
 
-    manifest = get_manifest()
-
     # If both seed_photos and database are empty, create initial sample shelf
-    if not seed_files and len(manifest) == 0:
+    if not seed_files:
         sample_path = seed_dir / "sample_workshop_shelf_01.jpg"
         logger.info("No seed photos found and DB is empty. Creating starter sample shelf: %s", sample_path.name)
         generate_default_sample_shelf_photo(sample_path)
@@ -160,18 +166,25 @@ def auto_seed(progress_callback=None):
 
 def enqueue_seed_photos(manager) -> int:
     """
-    Scans ./data/seed_photos/ and enqueues any unindexed photos into IngestManager
-    for non-blocking background ingestion.
+    Scans ./data/seed_photos/ and enqueues photos into IngestManager
+    for non-blocking background ingestion if and only if the database is currently empty.
     """
     init_db()
+    manifest = get_manifest()
+    if len(manifest) > 0:
+        logger.info(
+            "Database already contains %d photos. Skipping background seed photos (only loaded when DB is empty).",
+            len(manifest),
+        )
+        return 0
+
     data_dir = get_data_dir()
     seed_dir = data_dir / "seed_photos"
     seed_dir.mkdir(parents=True, exist_ok=True)
 
     seed_files = [f for f in seed_dir.iterdir() if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS]
-    manifest = get_manifest()
 
-    if not seed_files and len(manifest) == 0:
+    if not seed_files:
         sample_path = seed_dir / "sample_workshop_shelf_01.jpg"
         logger.info("No seed photos found and DB is empty. Creating starter sample shelf: %s", sample_path.name)
         generate_default_sample_shelf_photo(sample_path)

@@ -18,24 +18,38 @@ QUERY_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(
+        r"^(?:hey\s+|hi\s+|hello\s+)?(?:<@[A-Z0-9]+>\s+)?where\s+(?:the\s+|a\s+|some\s+)?(.+?)\s+(?:is|are|can\s+be\s+found|at)\s*[\?\.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"^(?:hey\s+|hi\s+|hello\s+)?(?:<@[A-Z0-9]+>\s+)?(?:find|locate|search(?:\s+for)?)\s+(?:the\s+|a\s+|some\s+)?(.+?)\s*[\?\.]*$",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"^(?:anyone|anybody)\s+(?:know\s+)?where\s+(?:the\s+|a\s+|some\s+)?(.+?)\s+(?:is|are|can\s+be\s+found|at)\s*[\?\.]*$",
+        re.IGNORECASE,
+    ),
 ]
+
+
+def strip_bot_mentions(text: str) -> str:
+    """Strips Slack user/bot mentions such as <@U12345678> from text."""
+    return re.sub(r"<@[A-Z0-9]+>", "", text, flags=re.IGNORECASE).strip()
 
 
 def parse_location_query(text: str) -> Optional[str]:
     """
     Parses a Slack message text to identify natural language location questions.
     Returns the clean search query keyword if matched, otherwise None.
+    Handles standard 'where is' queries as well as direct mention queries like
+    '<@spacegrep> aaa batteries' without any prefix.
     """
     if not text:
         return None
 
     clean_text = text.strip()
-
-    # Strip leading @bot mention if present: e.g. "<@U12345678> ..."
-    text_no_mention = re.sub(r"^<@[A-Z0-9]+>\s*", "", clean_text, flags=re.IGNORECASE).strip()
+    text_no_mention = strip_bot_mentions(clean_text)
+    had_mention = clean_text != text_no_mention
 
     # Check query patterns on both mention-stripped text and original text
     for target in (text_no_mention, clean_text):
@@ -47,12 +61,18 @@ def parse_location_query(text: str) -> Optional[str]:
                 if candidate:
                     return candidate
 
-    # If the user directly @mentioned the bot with search keywords, e.g. "<@U12345678> cr2032"
-    if clean_text != text_no_mention and text_no_mention:
+    # If the user directly @mentioned the bot with search keywords, e.g. "<@U12345678> aaa batteries"
+    if had_mention and text_no_mention:
+        clean_direct = re.sub(
+            r"^(?:hey\s+|hi\s+|hello\s+|please\s+|can\s+you\s+(?:find\s+)?|could\s+you\s+(?:find\s+)?)",
+            "",
+            text_no_mention,
+            flags=re.IGNORECASE,
+        ).strip()
         clean_direct = re.sub(
             r"^(?:where\s+(?:is|are|can\s+i\s+find)|find|locate|search(?:\s+for)?)\s+",
             "",
-            text_no_mention,
+            clean_direct,
             flags=re.IGNORECASE,
         )
         clean_direct = re.sub(
@@ -62,9 +82,40 @@ def parse_location_query(text: str) -> Optional[str]:
             flags=re.IGNORECASE,
         ).strip()
         clean_direct = re.sub(r"[\?\.\!]+$", "", clean_direct).strip()
-        if clean_direct and len(clean_direct.split()) <= 6:
+        if clean_direct and len(clean_direct.split()) <= 8:
             return clean_direct
 
+    return None
+
+
+def extract_query_from_parent_message(parent_text: str) -> Optional[str]:
+    """
+    Extracts a query from a parent thread message when a user invokes the bot in a reply thread.
+    Tries standard query parsing first, then short item inquiries.
+    """
+    if not parent_text:
+        return None
+    q = parse_location_query(parent_text)
+    if q:
+        return q
+    clean = strip_bot_mentions(parent_text)
+    clean = re.sub(
+        r"^(?:hey|hi|hello|anyone|anybody)\s+(?:know\s+|seen\s+)?",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    ).strip()
+    clean = re.sub(
+        r"^(?:do\s+we\s+have|have\s+we\s+got|is\s+there|seen)\s+(?:any\s+|the\s+|a\s+)?",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    ).strip()
+    clean = re.sub(r"^(?:the\s+|a\s+|an\s+|some\s+)", "", clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"[\?\.\!]+$", "", clean).strip()
+    words = clean.split()
+    if 1 <= len(words) <= 8:
+        return clean
     return None
 
 
@@ -85,6 +136,7 @@ async def handle_query_message(
     channel: str,
     message_ts: str,
     query: str,
+    thread_ts: Optional[str] = None,
 ) -> None:
     """Handles an extracted search query: scans inventory and replies with a pre-loaded link."""
     logger.info("Handling where-is query for '%s' in channel %s", query, channel)
@@ -92,8 +144,6 @@ async def handle_query_message(
     target_url = build_search_url(query)
 
     total = summary["total_matches"]
-    shelves = summary["shelves"]
-    sample_labels = summary["sample_labels"]
 
     if total > 0:
         reply = (
@@ -106,4 +156,5 @@ async def handle_query_message(
             f"<{target_url}|Open in Spacegrep>"
         )
 
-    await post_thread_reply(client, channel=channel, thread_ts=message_ts, text=reply)
+    target_thread_ts = thread_ts or message_ts
+    await post_thread_reply(client, channel=channel, thread_ts=target_thread_ts, text=reply)

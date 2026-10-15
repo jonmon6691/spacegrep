@@ -95,41 +95,41 @@ All database records (`inventory.db`), processed images, and seed photos persist
 
 ## Ingesting Workshop Photos
 
-There are two easy ways to add photos of your workshop shelves:
+There are several ways to add photos of your workshop shelves:
 
-### Method 1: Drop Folder (Automated on Boot)
-1. Place any shelf photos (`.jpg`, `.jpeg`, `.png`, `.webp`) into:
-   ```
-   ./data/seed_photos/
-   ```
-2. Restart the app (or run `make seed`).
-3. The server scans for unindexed photos (deduplicating by image hash), processes and compresses web-optimized images, calls Gemini Flash to detect storage bins and transcribe labels with semantic tags, and registers them in SQLite.
+### Initial Setup: Drop Folder (Cold-Start Seed)
+Photos placed in `./data/seed_photos/` (`.jpg`, `.jpeg`, `.png`, `.webp`) are ingested **only if the database is currently empty** (such as on first boot or clean deployment). If the database already contains indexed shelves, seed photos are skipped so that replaced or updated shelves are never overwritten.
+1. Place initial shelf photos into `./data/seed_photos/`.
+2. Start the app. Spacegrep automatically ingests seed photos and registers them in SQLite. (If no photos exist and the database is empty, a realistic workshop demo shelf is generated automatically).
+3. For ongoing additions and shelf updates, use **In-App Drag and Drop** or the **Slack Bot**.
 
-### Method 2: In-App Drag and Drop
+### In-App Drag and Drop
 1. Click **Upload Shelf** in the top omnibar (enter your admin password if prompted).
 2. Drag and drop any shelf photo.
-3. Watch the real-time progress banner (streamed via SSE) as Gemini detects bounding boxes, extracts labels, and indexes semantic tags across image tiles. The shelf will appear in the stream immediately.
+3. Wait while spacegrep detects bounding boxes, extracts labels, and indexes semantic tags across image tiles. The shelf will appear when the ingestion is complete.
 
-### Method 3: Slack Bot Upload (Channel Integration)
+### Slack Bot Upload (Channel Integration)
 Upload shelf photos or updates directly from any workshop Slack channel where the bot is invited:
 1. Configure `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in your `.env`.
-2. Invite the bot to your workshop channel (`/invite @spacegrep`) and upload or drag any shelf photo into the channel.
-3. The bot reacts with `:eyes:` to acknowledge receipt.
-4. Gemini inspects the photo for community guidelines (reminding members of policy if visible faces or blurry lighting are detected) and determines whether the photo is an updated angle/reorganization of an existing shelf or an entirely new shelf.
-5. Once ingested, the reaction transitions to `:white_check_mark:` and the bot thread-replies with the count of detected bins and a direct link to view the shelf live in Spacegrep!
+2. Invite the bot to your workshop channel (`/invite @spacegrep`).
+3. To upload, mention `@spacegrep` when sharing the photo (e.g. `@spacegrep here is the new soldering station rack`). The bot only acts on messages where it is at'ed, so it can live in any channel without interfering in unrelated discussions.
+4. The bot reacts with `:eyes:` to acknowledge receipt and runs background ingestion.
+5. Once ingested, the reaction transitions to `:white_check_mark:` and the bot replies in the thread with the count of detected bins and a direct link to view the shelf live in Spacegrep!
+6. If community policy notices are detected (such as visible faces or blurry lighting), the guideline reminder is posted as a **separate message in the thread set as a reply broadcast** so the reminder is transparently visible to the channel.
 
 ---
 
 ## Slack Location Search ("Where is X?")
 
-Members in your workshop Slack channel can quickly ask where tools or components are stored:
-- Example queries:
-  - `"Where is the kapton tape?"`
-  - `"Where are 10k resistors?"`
-  - `"Where can I find ESP32?"`
-  - `"@spacegrep find multimeter"`
-- The bot replies in the thread with an inventory summary and a constructed URL (e.g. `https://spacegrep.lan/?q=kapton+tape`).
-- Clicking the link takes the user directly to Spacegrep with their search query pre-loaded, the matching bins highlighted, and smoothly centered. Kiosk auto-reset is automatically paused for deep-linked search sessions.
+The bot can live in any channel and only responds when at'ed (`@spacegrep`), keeping general chatter uninterrupted.
+- Search queries do not require a "where is" prefix:
+  - `"@spacegrep kapton tape"`
+  - `"@spacegrep aaa batteries"`
+  - `"@spacegrep where is the soldering iron?"`
+  - `"@spacegrep find 10k resistors"`
+- **Reply Thread Invocation:** If someone asks where something is (e.g. *"Where are the AAA batteries?"*), a veteran member can reply in the thread with `@spacegrep` (or `@spacegrep aaa batteries`). The bot reads the thread context, searches the inventory, and posts the results directly into the thread.
+- The bot replies with an inventory summary and a deep link (e.g. `https://spacegrep.lan/?q=aaa+batteries`).
+- Clicking the link takes the user directly to Spacegrep with their search query pre-loaded, matching bins highlighted, and smoothly centered. Kiosk auto-reset is automatically paused for deep-linked search sessions.
 
 ---
 

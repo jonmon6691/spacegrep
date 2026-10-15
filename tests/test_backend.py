@@ -788,6 +788,42 @@ def test_hash_deduplication_on_seed_when_renamed(monkeypatch):
     assert manifest_after[0]["original_name"] == "My Cool Organizer"
 
 
+def test_seed_photos_skipped_when_db_is_not_empty(monkeypatch):
+    """
+    Verifies that when the database already contains photos (such as after an image
+    replacement with a new hash), seed photos are completely skipped and not re-ingested.
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    init_db()
+
+    # Insert a photo into database so database is NOT empty
+    insert_photo(
+        photo_id="test-existing-p",
+        filename="existing.jpg",
+        original_name="Existing Shelf",
+        width=800,
+        height=600,
+        image_hash="abc123existinghash",
+    )
+    manifest = get_manifest()
+    assert len(manifest) >= 1
+
+    # Put a brand new unindexed photo into seed_photos
+    seed_dir = get_data_dir() / "seed_photos"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    new_seed = seed_dir / "brand_new_unindexed_seed.jpg"
+    img = Image.new("RGB", (100, 100), color=(50, 100, 150))
+    img.save(new_seed, format="JPEG")
+
+    # auto_seed should immediately return 0 because DB is not empty
+    count = auto_seed()
+    assert count == 0
+
+    # enqueue_seed_photos should also immediately return 0 because DB is not empty
+    queued = enqueue_seed_photos(ingest_manager)
+    assert queued == 0
+
+
 def test_upload_duplicate_photo_returns_409(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("ADMIN_PASSWORD", "supersecret123")

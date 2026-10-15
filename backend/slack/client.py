@@ -71,13 +71,15 @@ async def post_thread_reply(
     channel: str,
     thread_ts: str,
     text: str,
+    reply_broadcast: bool = False,
 ) -> Optional[str]:
-    """Posts a thread reply message to the specified thread_ts."""
+    """Posts a thread reply message to the specified thread_ts, optionally broadcasting to the channel."""
     try:
         res = await client.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts,
             text=text,
+            reply_broadcast=reply_broadcast,
             unfurl_links=False,
             unfurl_media=False,
         )
@@ -85,3 +87,30 @@ async def post_thread_reply(
     except Exception as e:
         logger.error("Failed to post Slack thread reply: %s", e)
         return None
+
+
+async def fetch_parent_message(
+    client: AsyncWebClient,
+    channel: str,
+    thread_ts: str,
+) -> Optional[dict]:
+    """Fetches the root message of a thread from Slack using conversations.replies."""
+    try:
+        resp = await client.conversations_replies(
+            channel=channel,
+            ts=thread_ts,
+            limit=1,
+            inclusive=True,
+        )
+        messages = resp.get("messages", [])
+        if messages:
+            return messages[0]
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch parent message for thread %s in channel %s: %s",
+            thread_ts,
+            channel,
+            e,
+        )
+    return None
+

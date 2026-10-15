@@ -34,9 +34,15 @@ export const IngestBanner: React.FC<IngestBannerProps> = ({ onJobCompleted, onBa
     };
   }, [activeJobs.length, recentlyCompleted, isMinimized, onBannerHeightChange]);
 
+  const onJobCompletedRef = useRef(onJobCompleted);
+  useEffect(() => {
+    onJobCompletedRef.current = onJobCompleted;
+  }, [onJobCompleted]);
+
   useEffect(() => {
     let eventSource: EventSource | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let isMounted = true;
 
     const connectSSE = () => {
       eventSource = new EventSource('/api/ingest/stream');
@@ -44,7 +50,9 @@ export const IngestBanner: React.FC<IngestBannerProps> = ({ onJobCompleted, onBa
       eventSource.addEventListener('initial', (e: MessageEvent) => {
         try {
           const jobs: IngestJobState[] = JSON.parse(e.data);
-          setActiveJobs(jobs.filter((j) => j.status === 'queued' || j.status === 'processing'));
+          if (isMounted) {
+            setActiveJobs(jobs.filter((j) => j.status === 'queued' || j.status === 'processing'));
+          }
         } catch (err) {
           console.error('Failed to parse initial jobs:', err);
         }
@@ -53,12 +61,15 @@ export const IngestBanner: React.FC<IngestBannerProps> = ({ onJobCompleted, onBa
       eventSource.onmessage = (e: MessageEvent) => {
         try {
           const updated: IngestJobState = JSON.parse(e.data);
+          if (!isMounted) return;
           setActiveJobs((prev) => {
             if (updated.status === 'completed' || updated.status === 'failed') {
               if (updated.status === 'completed' && updated.photo_record) {
-                onJobCompleted(updated.photo_record);
+                onJobCompletedRef.current(updated.photo_record);
                 setRecentlyCompleted(updated.original_name);
-                setTimeout(() => setRecentlyCompleted(null), 6000);
+                setTimeout(() => {
+                  if (isMounted) setRecentlyCompleted(null);
+                }, 6000);
               }
               return prev.filter((j) => j.job_id !== updated.job_id);
             }
@@ -76,22 +87,24 @@ export const IngestBanner: React.FC<IngestBannerProps> = ({ onJobCompleted, onBa
         }
       };
 
+      // Native EventSource automatically attempts to reconnect on transient disconnects.
+      // We only fall back to polling if the connection is permanently closed.
       eventSource.onerror = () => {
-        // Fallback to polling if SSE is disconnected
-        if (eventSource) {
+        if (!isMounted) return;
+        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
           eventSource.close();
           eventSource = null;
-        }
-        if (!pollInterval) {
-          pollInterval = setInterval(async () => {
-            try {
-              const res = await fetch('/api/ingest/active');
-              if (res.ok) {
-                const jobs: IngestJobState[] = await res.json();
-                setActiveJobs(jobs);
-              }
-            } catch {}
-          }, 3000);
+          if (!pollInterval) {
+            pollInterval = setInterval(async () => {
+              try {
+                const res = await fetch('/api/ingest/active');
+                if (res.ok && isMounted) {
+                  const jobs: IngestJobState[] = await res.json();
+                  setActiveJobs(jobs.filter((j) => j.status === 'queued' || j.status === 'processing'));
+                }
+              } catch {}
+            }, 5000);
+          }
         }
       };
     };
@@ -99,10 +112,17 @@ export const IngestBanner: React.FC<IngestBannerProps> = ({ onJobCompleted, onBa
     connectSSE();
 
     return () => {
-      if (eventSource) eventSource.close();
-      if (pollInterval) clearInterval(pollInterval);
+      isMounted = false;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
     };
-  }, [onJobCompleted]);
+  }, []);
 
   // If recently completed and no active jobs, show brief celebration banner that shifts the page down
   if (activeJobs.length === 0 && recentlyCompleted) {
